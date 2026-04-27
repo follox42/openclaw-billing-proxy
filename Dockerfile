@@ -8,6 +8,8 @@ RUN npm install -g @anthropic-ai/claude-code
 
 WORKDIR /app
 COPY proxy.js .
+COPY entrypoint.sh .
+RUN chmod +x /app/entrypoint.sh
 
 # Volume pour persister les credentials OAuth entre redemarrages
 # (claude auth login ecrit dans /root/.claude/.credentials.json)
@@ -15,4 +17,4 @@ VOLUME ["/root/.claude"]
 
 EXPOSE 18801
 
-CMD ["node", "proxy.js"]
+CMD ["/app/entrypoint.sh"]
