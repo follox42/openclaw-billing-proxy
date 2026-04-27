@@ -1,28 +1,55 @@
 services:
-  proxy:
+  claude-bypass:
     build: .
-    image: openclaw-billing-proxy:latest
+    image: claude-bypass:latest
+    container_name: claude-bypass
     restart: unless-stopped
-    ports:
-      # IMPORTANT: 127.0.0.1 ensures proxy is only accessible locally
-      - "127.0.0.1:${PROXY_PORT:-18801}:${PROXY_PORT:-18801}"
+
+    # PAS de bloc `ports:` — le service est uniquement accessible
+    # depuis le reseau Docker interne (Coolify partage le reseau du project).
+    # OpenClaw et autres clients reachent via http://claude-bypass:18801
+
     volumes:
-      # Mount Claude Code credentials (read-only). Not needed if OAUTH_TOKEN is set.
-      - ${HOME}/.claude:/root/.claude:ro
-      # Uncomment to use custom replacement rules:
+      # Volume nomme pour persister les credentials OAuth
+      # apres `docker exec -it claude-bypass claude auth login`
+      - claude-creds:/root/.claude
+
+      # Optional : config custom (toolRenames, replacements). Decommente si besoin.
       # - ./config.json:/app/config.json:ro
+
     environment:
-      - OAUTH_TOKEN=${OAUTH_TOKEN:-}        # Set in .env to skip credential file mount
-      - PROXY_PORT=${PROXY_PORT:-}
-      - PROXY_HOST=0.0.0.0                  # Required: container must bind all interfaces for port mapping
+      - PROXY_PORT=18801
+      - PROXY_HOST=0.0.0.0  # bind interne au container — necessaire pour reachability inter-container
+      # OAUTH_TOKEN volontairement omis — on utilise le volume + claude auth login
+
     healthcheck:
-      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:${PROXY_PORT:-18801}/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))\""]
+      test:
+        - CMD-SHELL
+        - >-
+          node -e "require('http').get('http://localhost:18801/health',
+          r => process.exit(r.statusCode === 200 ? 0 : 1))
+          .on('error', () => process.exit(1))"
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 5s
+      start_period: 10s
+
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
+
+    networks:
+      - default
+
+volumes:
+  claude-creds:
+    # Le volume nomme — Coolify le persiste automatiquement entre deploiements
+
+networks:
+  default:
+    # Reseau du project Coolify — partage avec les autres services du meme project.
+    # Si OpenClaw est dans un autre project Coolify, creer un reseau external partage :
+    #   external: true
+    #   name: coolify-shared
