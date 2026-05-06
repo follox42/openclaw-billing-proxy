@@ -6,8 +6,8 @@ services:
     restart: unless-stopped
 
     # PAS de bloc `ports:` — le service est uniquement accessible
-    # depuis le reseau Docker interne (Coolify partage le reseau du project).
-    # OpenClaw et autres clients reachent via http://claude-bypass:18801
+    # depuis les reseaux Docker (default = project openclaw, coolify = principal Coolify).
+    # Clients reachent via http://claude-bypass:18801 depuis n'importe lequel des deux reseaux.
 
     volumes:
       # Volume nomme pour persister les credentials OAuth
@@ -42,6 +42,7 @@ services:
 
     networks:
       - default
+      - coolify
 
 volumes:
   claude-creds:
@@ -49,7 +50,9 @@ volumes:
 
 networks:
   default:
-    # Reseau du project Coolify — partage avec les autres services du meme project.
-    # Si OpenClaw est dans un autre project Coolify, creer un reseau external partage :
-    #   external: true
-    #   name: coolify-shared
+    # Reseau du project Coolify openclaw — partage avec les autres services du meme project (openclaw, etc.).
+  coolify:
+    external: true
+    name: coolify
+    # Reseau principal Coolify — permet aux apps Dockerfile-mode (poker-coach, etc.)
+    # d'atteindre claude-bypass via DNS Docker.
