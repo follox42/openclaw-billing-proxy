@@ -34,7 +34,7 @@ const { StringDecoder } = require('string_decoder');
 // ─── Defaults ───────────────────────────────────────────────────────────────
 const DEFAULT_PORT = 18801;
 const UPSTREAM_HOST = 'api.anthropic.com';
-const VERSION = '2.2.3';
+const VERSION = '2.3.0';
 
 // Claude Code version to emulate (update when new CC versions are released)
 const CC_VERSION = '2.1.97';
@@ -433,6 +433,61 @@ function getToken(credsPath) {
   return oauth;
 }
 
+// Anthropic OAuth public client_id used by Claude Code CLI for refresh flow.
+const CLAUDE_CODE_OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
+const OAUTH_REFRESH_MARGIN_MS = 5 * 60 * 1000; // refresh when < 5min TTL remains
+let refreshInFlight = null; // dedupe concurrent refreshes
+
+async function ensureFreshToken(oauth, credsPath) {
+  // env-var mode has no refresh_token; nothing to do.
+  if (credsPath === 'env' || !isFinite(oauth.expiresAt)) return oauth;
+  // Still has plenty of TTL: return as-is.
+  if (oauth.expiresAt - Date.now() > OAUTH_REFRESH_MARGIN_MS) return oauth;
+  if (!oauth.refreshToken) {
+    throw new Error('OAuth token expired and no refresh_token in credentials. Run "claude auth login".');
+  }
+  // Dedupe concurrent refresh attempts across in-flight requests.
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = (async () => {
+    const ttlMin = (oauth.expiresAt - Date.now()) / 60000;
+    console.log(`[REFRESH] Token TTL ${ttlMin.toFixed(1)}min, refreshing OAuth...`);
+    const res = await fetch('https://console.anthropic.com/v1/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        grant_type: 'refresh_token',
+        refresh_token: oauth.refreshToken,
+        client_id: CLAUDE_CODE_OAUTH_CLIENT_ID,
+      }),
+    });
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '');
+      throw new Error(`OAuth refresh failed: HTTP ${res.status} ${errBody.slice(0, 200)}`);
+    }
+    const data = await res.json();
+    if (!data.access_token || typeof data.expires_in !== 'number') {
+      throw new Error(`OAuth refresh returned unexpected payload: ${JSON.stringify(data).slice(0, 200)}`);
+    }
+    const newOauth = {
+      ...oauth,
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token || oauth.refreshToken,
+      expiresAt: Date.now() + data.expires_in * 1000,
+    };
+    // Atomic write: tmp file then rename, preserve 0600 perms.
+    const tmpPath = credsPath + '.tmp';
+    fs.writeFileSync(tmpPath, JSON.stringify({ claudeAiOauth: newOauth }), { mode: 0o600 });
+    fs.renameSync(tmpPath, credsPath);
+    console.log(`[REFRESH] OK — token valid for ${(data.expires_in / 3600).toFixed(1)}h`);
+    return newOauth;
+  })();
+  try {
+    return await refreshInFlight;
+  } finally {
+    refreshInFlight = null;
+  }
+}
+
 // ─── Helper ─────────────────────────────────────────────────────────────────
 // String-aware bracket matching: skips [/] inside JSON string values so that
 // brackets in tool descriptions or text content don't corrupt the depth count.
@@ -778,10 +833,16 @@ function startServer(config) {
     const chunks = [];
 
     req.on('data', c => chunks.push(c));
-    req.on('end', () => {
+    req.on('end', async () => {
       let body = Buffer.concat(chunks);
       let oauth;
       try { oauth = getToken(config.credsPath); } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ type: 'error', error: { message: e.message } }));
+        return;
+      }
+      try { oauth = await ensureFreshToken(oauth, config.credsPath); } catch (e) {
+        console.error(`[REFRESH] ${e.message}`);
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ type: 'error', error: { message: e.message } }));
         return;

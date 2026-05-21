@@ -1,5 +1,38 @@
 # Changelog
 
+## v2.3.0 -- 2026-05-21
+
+### Self-healing OAuth token refresh (no more 401 after token expiry)
+
+**Changes:**
+- New `ensureFreshToken(oauth, credsPath)` helper called inline on every
+  request handler, before the `Authorization: Bearer` header is built.
+- Refreshes the Claude Code OAuth token via
+  `POST https://console.anthropic.com/v1/oauth/token` when the cached
+  `expiresAt` is within 5 minutes of now (configurable via the
+  `OAUTH_REFRESH_MARGIN_MS` constant).
+- Concurrent in-flight refresh requests are deduped via a single shared
+  promise (`refreshInFlight`).
+- New credentials are written atomically (`*.tmp` + `rename`) with `0600`
+  permissions to avoid partial-write corruption.
+- env-var mode (`OAUTH_TOKEN`) is bypassed since it has no refresh_token.
+
+**Why:**
+The proxy reads `.credentials.json` fresh on every request but never
+refreshed the OAuth access token, so once the ~8h TTL expired the proxy
+returned 401 indefinitely until somebody manually ran `claude auth status`
+or `claude --print ...` inside the container to trigger the CLI's internal
+refresh. With this change the proxy is fully self-contained: as long as
+the refresh_token in `.credentials.json` stays valid, requests keep
+working without any external cron or claude-CLI invocations.
+
+This supersedes the previous attempt at a background entrypoint refresh
+loop (reverted in d3f2f63) which polled blindly every 12h via the claude
+CLI subprocess — inline refresh is more precise (only when needed) and
+more robust (no silent background failures).
+
+---
+
 ## v2.2.4 -- 2026-04-09
 
 ### Fix config strip boundary using filesystem paths instead of AGENTS.md (closes #26)
